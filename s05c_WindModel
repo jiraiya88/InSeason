@@ -1,0 +1,187 @@
+## Vishal : 6thFeb2017 - developed for QBE
+## Vishal : 3rdMarch2018 - updated to serve for any basin and south as well as north hemisphere
+## Rado   : 31stJul2018 - added extratropical transition
+## Rado	  : ET attempts - Jan 2018
+
+wind_gen<-function(Long,Lat,Cp,rmw1,rmw2,fi1,fi2,B1,B2,v,angle_celerity,gr_Long,gr_Lat,z0,r,profile,vt,ut,pe){
+  
+  ### INPUTS ###
+  # Long            - Longitude of TC centre
+  # Lat             - Latitude of TC centre
+  # Cp              - Central pressure [Pa]
+  # vmax            - Maximum wind estimate [m/s] (used for B parameter)
+  # rmw1            - Radius of maximum wind - primary [m]
+  # rmw2            - Radius of maximum wind - secondary [m]
+  # fi1             - fi parameter in double vortex pressure representation - primary vortex
+  # fi2             - fi parameter in double vortex pressure representation - secondary vortex
+  # B1              - B parameter in double vortex pressure representation - primary vortex (not equal to holland parameter, but related)
+  # B2              - B parameter in double vortex pressure representation - secondary vortex (not equal to holland parameter, but related)
+  # v               - Speed of TC movement [m/s]
+  # angle_celerity  - Direction of TC travel [degree]
+  # gr_Long         - Longitudes of points where wind should be estimated
+  # gr_Lat          - Latitudes of points where wind should be estimated
+  # z0              - Roughness length in points where wind should be estimated [m]
+  # r               - Distance of points of interest to the TC centre [m]
+  # profile         - If 1 consider power law for wind profile, else till 100m power law and below 100m  log law
+  # grid            - If 1 stores only footprint, else saves per step
+  # vt              - Thermal Wind without LN part (from 1000 to 900hPa) along y axis
+  # ut              - Thermal Wind without LN part (from 1000 to 900hPa) along x axis
+  # pe              - better representation of ambient pressure average from monthly mean pressure from 800 to 1000km around storm centre
+
+  source('./TK_PROC_Scripts/hazard/Functions/innerParam.R')
+  
+  gr_Long[gr_Long>180]<-gr_Long[gr_Long>180]-360
+  
+  #--   Constants   ---
+  
+  roh<-1.15                # air density [kg/m3]
+  f<-2*7.29*(10^(-5))*sin(abs(Lat)*pi/180)   
+                          # Coriolis parameter
+  d<-100                  # Arbitrary small distance in meters used for derivation
+
+  #..   Constants   ...
+  
+  #-- Term to account for storm speed addition (relative to movement)
+  # faster way to calculate initial bearing than geosphere package (almost 5 times)
+  # https://www.movable-type.co.uk/scripts/latlong.html
+  # it is different up to +/- 0.13 degree which is good enough 
+  
+  angle_r<-(atan2(sin((gr_Long-Long)*pi/180)*cos(gr_Lat*pi/180),cos(Lat*pi/180)*sin(gr_Lat*pi/180)-sin(Lat*pi/180)*cos(gr_Lat*pi/180)*cos((gr_Long-Long)*pi/180)))*180/pi
+  alpha<-angle_r-angle_celerity
+  if(Lat<0){
+    alpha<-360-alpha # South hemisphere (SH)
+  }
+  alpha<-(720+alpha) %% 360
+  alpha<-v*sin(alpha*pi/180)
+  
+  #.. Term to account for storm speed addition (relative to movement)
+  
+  ####################################################
+  ###   Speed at higher levels: Geostrophic wind   ###
+  ####################################################
+  # assuming double vortex
+  
+  dp2<-100*pmin(pe/100-Cp/100,7.6+0.05*(pe/100-Cp/100))
+  dp1<-pe-Cp-dp2
+  
+  Vg<-rep(NA,length(r))
+  #-- Tangential speed
+  # Note: for southern hemisphere in place of changing the sign of (-f*r); I changed sign of Latitude in f computation so the equation remains same
+  # DOUBLE VORTEX
+  
+  mdx<-(r<rmw1)
+  # for beyond Rmax
+  Vg[!mdx]<-0.5*(alpha[!mdx]-f*r[!mdx]) + sqrt(0.25*(alpha[!mdx]-f*r[!mdx])^2 + (fi1*B1*dp1*((rmw1/r[!mdx])^B1)*exp((-1)*fi1*(rmw1/r[!mdx])^B1) + fi2*B2*dp2*((rmw2/r[!mdx])^B2)*exp((-1)*fi2*(rmw2/r[!mdx])^B2))/roh)
+  
+  A1<-0.5*(alpha[mdx]-f*rmw1) + sqrt(0.25*(alpha[mdx]-f*rmw1)^2 + (fi1*B1*dp1*exp((-1)*fi1) + fi2*B2*dp2*((rmw2/rmw1)^B2)*exp((-1)*fi2*(rmw2/rmw1)^B2))/roh)
+  AL<-0.5*(alpha[mdx]-f*(rmw1-d/10)) + sqrt(0.25*(alpha[mdx]-f*(rmw1-d/10))^2 + (fi1*B1*dp1*((rmw1/(rmw1-d/10))^B1)*exp((-1)*fi1*(rmw1/(rmw1-d/10))^B1) + fi2*B2*dp2*((rmw2/(rmw1-d/10))^B2)*exp((-1)*fi2*(rmw2/(rmw1-d/10))^B2))/roh)
+  AH<-0.5*(alpha[mdx]-f*(rmw1+d/10)) + sqrt(0.25*(alpha[mdx]-f*(rmw1+d/10))^2 + (fi1*B1*dp1*((rmw1/(rmw1+d/10))^B1)*exp((-1)*fi1*(rmw1/(rmw1+d/10))^B1) + fi2*B2*dp2*((rmw2/(rmw1+d/10))^B2)*exp((-1)*fi2*(rmw2/(rmw1+d/10))^B2))/roh)
+  A3<-(AH-2*A1+AL)/((d/10)^2)
+  
+  dum<-innerParam(A1,A3,rmw1)
+  Vg[mdx]<-dum$c1*(r[mdx])+dum$c2*(r[mdx])^2+dum$c3*(r[mdx])^3
+  
+  ####################################################
+  ###   Boundary Layer Modeling: Geostrophic wind  ###
+  ####################################################
+ 
+  Vg1<-rep(NA,length(r))
+  ldx<-((r+d)<rmw1)
+  
+  #-- Parameters important for inflow angle and roughness impact estimate
+  Vg1[!ldx]<-0.5*(alpha[!ldx]-f*(r[!ldx]+d)) + sqrt(0.25*(alpha[!ldx]-f*(r[!ldx]+d))^2 + (fi1*B1*dp1*((rmw1/(r[!ldx]+d))^B1)*exp((-1)*fi1*(rmw1/(r[!ldx]+d))^B1) + fi2*B2*dp2*((rmw2/(r[!ldx]+d))^B2)*exp((-1)*fi2*(rmw2/(r[!ldx]+d))^B2))/roh)
+
+  # for below Rmax
+  mdx<-((r[mdx]+d)<rmw1)
+  dum<-innerParam(A1[mdx],A3[mdx],rmw1)
+  Vg1[ldx]<-dum$c1*(r[ldx]+d)+dum$c2*(r[ldx]+d)^2+dum$c3*(r[ldx]+d)^3
+
+  EpsC <- ((2*Vg/r+f)^0.5) / (((Vg1-Vg)/d+Vg/r+f)^0.5)        # epsilon   - used in inflow calc. [eq. 2.16] ; zi
+  cfc  <- ((2*Vg/r+f)^0.5)* (((Vg1-Vg)/d+Vg/r+f)^0.5)         # f(alpha)  - used in Rossby number calc. [eq. 2.15] ; lambdaf    
+  #.. Parameters important for inflow angle and rougness impact estimate
+  
+  #-- Height of gradient level
+  logRoc<-log10(Vg/(cfc*z0))                              # log10 of Rossby number
+  a<-0.27+0.09*log10(z0)+0.018*(log10(z0))^2+0.0016*(log10(z0))^3
+  zg<-0.052*Vg/(cfc*(logRoc)^1.45)                        # height of gradient level
+  #.. Height of gradient level
+  
+
+  #-- Bring wind to 10m height from gradient level  (basis Davenport,1965 and Meng et al., 1997).
+  if(profile==1){
+                Vg<-(Vg*(10/zg)^a)                                 # power law
+  } else {                                            
+                Vg<-(Vg*(100/zg)^a)*log10(10/z0)/log10(100/z0)     # till 100m power law and then log law
+  }
+  #.. Bring wind to 10m height from gradient level  (basis Davenport,1965 and Meng et al., 1997).
+  Vg[is.na(Vg)]<-0
+  
+  #-- Inflow angle at ground
+  GammaS <- (69+100*EpsC)*(logRoc)^-1.13
+  Inflow <- GammaS*(1-0.4*10/zg)^1.1    # inflow angle; assuming 10 meter height
+  Inflow[is.nan(Inflow)]<-0
+  Inflow[Inflow>150]<-0
+
+  # change measuring from North (0 degrees) clockwise
+  angle_r<-(720+angle_r) %% 360
+  if(Lat<0){
+    # South Hemisphere
+    Dir<-(720 +               # increment to stay in positive number
+          angle_r +           # position vector angle
+          90 +                # change angle 90 degrees in direction of wind
+          Inflow +            # account for Inflow
+          180) %% 360         # switch to opposite direction to be in-line with Kx (Kx is stored based on direction FROM which wind is blowing)
+  } else {
+    # Northern Hemisphere
+    Dir<-(720 +               # increment to stay in positive number
+          angle_r -           # position vector angle
+          90 -                # change angle 90 degrees in direction of wind
+          Inflow +            # account for Inflow
+          180) %% 360         # switch to opposite direction to be in-line with Kx (Kx is stored based on direction FROM which wind is blowing)
+  }
+  
+  #########################
+  ###    ET addition    ###
+  #########################
+
+  # pressure at locations
+  pp<-(Cp+dp1*exp((-1)*fi1*(rmw1/r)^B1)+dp2*exp((-1)*fi2*(rmw2/r)^B2)) 
+  
+  # thermal wind addition between pressure level Pe and pressure level Cp
+  myv<-Vg*cos((Dir+180)*pi/180)+vt*log(pe/pp)
+  myu<-Vg*sin((Dir+180)*pi/180)+ut*log(pe/pp)
+  
+  # Work out new direction modified by thermal wind
+  VET<-sqrt(myv^2+myu^2)
+  DirT<-(720 + atan(myu/myv)*180/pi) %% 360       # U>0; V>0
+  DirT[myv<0]<-180+DirT[myv<0]    # U>0; V<0 & U<0; V<0
+  DirT[myu<0 & myv>0]<-360+DirT[myu<0 & myv>0]    # U<0; V>0
+  DirT<-(720 + DirT + 180) %% 360           # 180 to turn wind to direction FROM which it is flowing
+
+  
+  ##################
+  ###    GUST    ###
+  ##################
+  # gust factor from 1hr to 3sec
+  # ... 1.66 is a factor to convert from 10 min sustained wind to 3s gust (in-Land): WMO, GUIDELINES FOR CONVERTING BETWEEN VARIOUS WIND AVERAGING PERIODS IN TROPICAL CYCLONE CONDITIONS
+  # ... increment 3.3 according to Matsui converts to 10-min sustained wind speed: Mathias Graf, Bayesian framework for probabilistic modelling of typhoon risks (section 2.9.3)
+  # gust factor from 1hr to 3sec
+  # factor of 1.66 used as per WMO
+  Vg<-Vg*1.4
+  VET<-VET*1.4
+  
+
+  ##################
+  ###   OUTPUT   ###
+  ##################
+  
+  ### temporary comment
+   VET[is.na(VET)]<-0
+   DirT[is.na(DirT)]<-0
+  
+  out<-data.frame(w10=Vg,Dir,w10ET=VET,DirET=DirT)
+
+  
+  return(out)
+}
+
